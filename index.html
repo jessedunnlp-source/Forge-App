@@ -90,6 +90,10 @@ p.page-sub{color:var(--muted); font-size:14px; margin:0 0 18px 0; line-height:1.
 .date-pill.active .dnum{color:var(--accent);}
 .date-pill.done.active{background:rgba(34,197,94,.18); border-color:var(--accent2);}
 .date-pill.done.active .dnum{color:var(--accent2);}
+.date-pill.skipped .dnum{color:var(--muted); text-decoration:line-through;}
+.date-pill.skipped .mark{background:var(--warn);}
+.date-pill.makeup .mark{background:var(--accent2);}
+.date-pill.makeup .dnum{color:var(--accent2);}
 
 /* Progress bar */
 .progress-wrap{display:flex; align-items:center; gap:10px; margin-bottom:14px;}
@@ -153,6 +157,7 @@ canvas{width:100%; display:block;}
 .heatmap .cell{aspect-ratio:1; border-radius:4px; background:var(--card2);}
 .heatmap .cell.done{background:var(--accent2);}
 .heatmap .cell.missed{background:rgba(240,80,110,.55);}
+.heatmap .cell.skipped{background:rgba(245,165,36,.4);}
 .heatmap .cell.future{background:transparent; border:1px solid var(--border);}
 .weight-entry{display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid var(--border); font-size:14px;}
 .weight-entry:last-child{border-bottom:none;}
@@ -217,7 +222,7 @@ window.addEventListener('error', function(e){
 /* ---------------------------------------------------------------------
    DATA MODEL
 --------------------------------------------------------------------- */
-var KEYS = { profile:'ir_profile_v1', phase:'ir_phase_v1', workouts:'ir_workouts_v1', weights:'ir_weights_v1', strengthLogs:'ir_strength_v1' };
+var KEYS = { profile:'ir_profile_v1', phase:'ir_phase_v1', workouts:'ir_workouts_v1', weights:'ir_weights_v1', strengthLogs:'ir_strength_v1', customDays:'ir_customdays_v1', makeups:'ir_makeups_v1' };
 
 function todayStr(d){ d = d || new Date(); var y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), day=String(d.getDate()).padStart(2,'0'); return y+'-'+m+'-'+day; }
 function parseDate(s){ var p=s.split('-'); return new Date(parseInt(p[0]),parseInt(p[1])-1,parseInt(p[2])); }
@@ -241,9 +246,11 @@ var defaultProfile = {
 var state = {
   profile: Object.assign({}, defaultProfile, loadJSON(KEYS.profile, {})),
   phase: loadJSON(KEYS.phase, 3),
-  workouts: loadJSON(KEYS.workouts, {}),   // { '2026-07-09': {done, checks[], adjustment, equipOverride, health:{cal,min,hr}} }
+  workouts: loadJSON(KEYS.workouts, {}),   // { '2026-07-09': {done, checks[], adjustment, equipOverride, skipped, health:{cal,min,hr}} }
   weights: loadJSON(KEYS.weights, [{date: todayStr(), kg: 100}]),
-  strengthLogs: loadJSON(KEYS.strengthLogs, {}) // { squat: [{date, weight, reps, name}] }
+  strengthLogs: loadJSON(KEYS.strengthLogs, {}), // { squat: [{date, weight, reps, name}] }
+  customDays: loadJSON(KEYS.customDays, {}),     // { 3:[1,3,5], 4:[...], 5:[...] } — user-chosen weekdays per phase
+  makeups: loadJSON(KEYS.makeups, {})            // { '2026-07-12': {fromDate:'2026-07-10', dayIdx:2} } — skipped sessions moved here
 };
 
 function persist(){
@@ -252,6 +259,8 @@ function persist(){
   saveJSON(KEYS.workouts, state.workouts);
   saveJSON(KEYS.weights, state.weights);
   saveJSON(KEYS.strengthLogs, state.strengthLogs);
+  saveJSON(KEYS.customDays, state.customDays);
+  saveJSON(KEYS.makeups, state.makeups);
 }
 
 /* ---------------------------------------------------------------------
@@ -444,7 +453,7 @@ function buildProgram(profile, phase){
     ? shapes.map(function(_, i){ return PREGNANCY_DAYS[i % PREGNANCY_DAYS.length]; })
     : shapes.map(function(shapeKey){ return buildDay(shapeKey, profile); });
   var goalLabel = profile.lifeStage==='pregnant' ? 'Pregnancy-Safe' : (GOALS[profile.goal]||GOALS.general).label;
-  return { label: phase+'-Day · '+goalLabel, weekdays: WEEKDAYS_BY_PHASE[phase], blurb: programBlurb(profile), days: days };
+  return { label: phase+'-Day · '+goalLabel, weekdays: getTrainingDays(phase), blurb: programBlurb(profile), days: days };
 }
 
 function safetyNote(profile){
@@ -494,13 +503,82 @@ function applyAdjustment(day, adjustment){
 /* ---------------------------------------------------------------------
    HELPERS: schedule / streak / stats
 --------------------------------------------------------------------- */
+// User can override which weekdays are training days for a given phase
+// (must match that phase's day-count to take effect); otherwise falls
+// back to the default Mon/Wed/Fri-style pattern.
+function getTrainingDays(phase){
+  var custom = state.customDays && state.customDays[phase];
+  return (custom && custom.length === phase) ? custom : WEEKDAYS_BY_PHASE[phase];
+}
+
+function isScheduled(dateStr, phase){
+  var d = parseDate(dateStr);
+  return getTrainingDays(phase).indexOf(d.getDay()) !== -1;
+}
+
+function scheduledDayIndex(dateStr, phase){
+  var d = parseDate(dateStr);
+  return getTrainingDays(phase).indexOf(d.getDay());
+}
+
+// A date "counts" toward streaks/progress if it's a normal training day
+// that wasn't skipped, OR a rest day hosting a skipped session's makeup.
+function isEffectivelyScheduled(dateStr){
+  var normally = isScheduled(dateStr, state.phase);
+  var log = state.workouts[dateStr];
+  if(normally && log && log.skipped) return false;
+  if(normally) return true;
+  return !!(state.makeups && state.makeups[dateStr]);
+}
+
+function findMakeupFrom(dateStr){
+  if(!state.makeups) return null;
+  for(var k in state.makeups){ if(state.makeups[k].fromDate === dateStr) return k; }
+  return null;
+}
+
+// Marks a scheduled day as skipped and moves its session to the next
+// upcoming date that's normally a rest day and doesn't already host a makeup.
+function skipDay(dateStr){
+  var idx = scheduledDayIndex(dateStr, state.phase);
+  if(idx === -1) return null;
+  var log = state.workouts[dateStr] || {done:false, checks:[]};
+  log.skipped = true;
+  state.workouts[dateStr] = log;
+  var cur = parseDate(dateStr);
+  for(var i=0;i<60;i++){
+    cur.setDate(cur.getDate()+1);
+    var ds = todayStr(cur);
+    if(!isScheduled(ds, state.phase) && !(state.makeups && state.makeups[ds])){
+      if(!state.makeups) state.makeups = {};
+      state.makeups[ds] = { fromDate: dateStr, dayIdx: idx };
+      return ds;
+    }
+  }
+  return null;
+}
+
+function unskipDay(dateStr){
+  var log = state.workouts[dateStr];
+  if(log){ log.skipped = false; }
+  var target = findMakeupFrom(dateStr);
+  if(target && state.makeups){ delete state.makeups[target]; }
+}
+
 function getDayInfo(dateStr){
   var d = parseDate(dateStr);
   var wd = d.getDay();
-  var idx = WEEKDAYS_BY_PHASE[state.phase].indexOf(wd);
-  if(idx === -1) return null;
+  var idx = getTrainingDays(state.phase).indexOf(wd);
+  var log = state.workouts[dateStr];
   var prog = buildProgram(state.profile, state.phase);
-  return { dayIdx: idx, day: prog.days[idx], date: dateStr, programLabel: prog.label };
+  if(idx !== -1 && !(log && log.skipped)){
+    return { dayIdx: idx, day: prog.days[idx], date: dateStr, programLabel: prog.label, isMakeup:false };
+  }
+  var makeup = state.makeups && state.makeups[dateStr];
+  if(makeup){
+    return { dayIdx: makeup.dayIdx, day: prog.days[makeup.dayIdx], date: dateStr, programLabel: prog.label, isMakeup:true, makeupFrom: makeup.fromDate };
+  }
+  return null;
 }
 
 function getEffectiveDay(dateStr){
@@ -515,17 +593,7 @@ function getEffectiveDay(dateStr){
     day = buildDay(shapeKey, tempProfile);
   }
   if(!pregnancy && log && log.adjustment){ day = applyAdjustment(day, log.adjustment); }
-  return { dayIdx: info.dayIdx, day: day, date: dateStr, programLabel: info.programLabel, pregnancy: pregnancy };
-}
-
-function isScheduled(dateStr, phase){
-  var d = parseDate(dateStr);
-  return WEEKDAYS_BY_PHASE[phase].indexOf(d.getDay()) !== -1;
-}
-
-function scheduledDayIndex(dateStr, phase){
-  var d = parseDate(dateStr);
-  return WEEKDAYS_BY_PHASE[phase].indexOf(d.getDay());
+  return { dayIdx: info.dayIdx, day: day, date: dateStr, programLabel: info.programLabel, pregnancy: pregnancy, isMakeup: info.isMakeup, makeupFrom: info.makeupFrom };
 }
 
 function getTodaysLog(slot, dateStr){
@@ -553,7 +621,7 @@ function scheduledDatesUpToToday(){
   cur.setHours(0,0,0,0);
   while(cur <= end){
     var ds = todayStr(cur);
-    if(isScheduled(ds, state.phase)) out.push(ds);
+    if(isEffectivelyScheduled(ds)) out.push(ds);
     cur.setDate(cur.getDate()+1);
   }
   return out;
@@ -593,13 +661,13 @@ function weekBounds(d){
 
 function weekProgress(){
   var wb = weekBounds();
-  var target = WEEKDAYS_BY_PHASE[state.phase].length;
+  var target = getTrainingDays(state.phase).length;
   var done = 0;
   var cur = new Date(wb.start);
   var today = new Date(); today.setHours(0,0,0,0);
   while(cur <= wb.end && cur <= today){
     var ds = todayStr(cur);
-    if(isScheduled(ds, state.phase) && state.workouts[ds] && state.workouts[ds].done) done++;
+    if(isEffectivelyScheduled(ds) && state.workouts[ds] && state.workouts[ds].done) done++;
     cur.setDate(cur.getDate()+1);
   }
   return {done:done, target:target};
@@ -683,10 +751,16 @@ function buildDateStrip(){
   var dates = dateStripRange();
   var html = dates.map(function(ds){
     var d = parseDate(ds);
-    var scheduled = isScheduled(ds, state.phase);
-    var done = scheduled && state.workouts[ds] && state.workouts[ds].done;
+    var normally = isScheduled(ds, state.phase);
+    var log = state.workouts[ds];
+    var skipped = normally && log && log.skipped;
+    var isMakeup = !normally && state.makeups && !!state.makeups[ds];
+    var scheduled = isEffectivelyScheduled(ds);
+    var done = scheduled && log && log.done;
     var cls = ['date-pill'];
     if(!scheduled) cls.push('rest'); else cls.push('scheduled');
+    if(skipped) cls.push('skipped');
+    if(isMakeup) cls.push('makeup');
     if(done) cls.push('done');
     if(ds === todayStr()) cls.push('today');
     if(ds === selectedDate) cls.push('active');
@@ -715,8 +789,16 @@ function refreshStripMarks(){
   if(!strip) return;
   strip.querySelectorAll('.date-pill').forEach(function(pill){
     var ds = pill.getAttribute('data-date');
-    var scheduled = isScheduled(ds, state.phase);
-    var done = scheduled && state.workouts[ds] && state.workouts[ds].done;
+    var normally = isScheduled(ds, state.phase);
+    var log = state.workouts[ds];
+    var skipped = normally && log && log.skipped;
+    var isMakeup = !normally && state.makeups && !!state.makeups[ds];
+    var scheduled = isEffectivelyScheduled(ds);
+    var done = scheduled && log && log.done;
+    pill.classList.toggle('scheduled', !!scheduled);
+    pill.classList.toggle('rest', !scheduled);
+    pill.classList.toggle('skipped', !!skipped);
+    pill.classList.toggle('makeup', !!isMakeup);
     pill.classList.toggle('done', !!done);
   });
 }
@@ -744,6 +826,31 @@ function updateWorkoutBody(){
   var subHtml = dateLabel + (rel ? ' <span class="badge">'+rel+'</span>' : '');
 
   if(!effDay){
+    var normallyScheduled = isScheduled(selectedDate, state.phase);
+    var todayLog = state.workouts[selectedDate];
+    var wasSkipped = normallyScheduled && todayLog && todayLog.skipped;
+    if(wasSkipped){
+      var makeupTarget = findMakeupFrom(selectedDate);
+      body.innerHTML =
+        '<p class="page-sub">'+subHtml+'</p>'+
+        '<div class="card">'+
+          '<div class="empty-state">'+
+          '<div style="font-weight:700; color:var(--text); margin-bottom:4px;">Skipped</div>'+
+          '<div class="small-muted">This session was skipped'+(makeupTarget ? ' — moved to '+fmtShort(makeupTarget) : '')+'.</div></div>'+
+        '</div>'+
+        '<button class="link-btn" id="undoSkipBtn">Undo skip</button>';
+      var undoBtn = document.getElementById('undoSkipBtn');
+      if(undoBtn){
+        undoBtn.addEventListener('click', function(){
+          unskipDay(selectedDate);
+          persist();
+          updateWorkoutBody();
+          updateStreakPill();
+          refreshStripMarks();
+        });
+      }
+      return;
+    }
     body.innerHTML =
       '<p class="page-sub">'+subHtml+'</p>'+
       '<div class="card">'+
@@ -767,12 +874,20 @@ function updateWorkoutBody(){
 
   var html = '<p class="page-sub">'+subHtml+' · '+effDay.day.title+' · '+effDay.day.focus+' <span class="badge">'+effDay.programLabel+'</span></p>';
 
+  if(effDay.isMakeup){
+    html += '<div class="tip"><b>Makeup session</b> — moved here from '+fmtShort(effDay.makeupFrom)+'.</div>';
+  }
+
   if(isFuture){
     html += '<div class="tip"><b>Preview only —</b> this unlocks for ticking off on '+dateLabel+'.</div>';
   } else if(allDone){
     html += '<div class="tip"><b>Complete.</b> Workout finished'+(selectedDate===today?' for today':'')+' — nice work.</div>';
   } else {
     html += '<div class="progress-wrap"><div class="progress-track"><div class="progress-fill" style="width:'+pct+'%"></div></div><span>'+doneCount+'/'+flatItems.length+'</span></div>';
+  }
+
+  if(!effDay.pregnancy && !effDay.isMakeup){
+    html += '<button class="link-btn" id="skipDayBtn">Skip this day → move to next rest day</button>';
   }
 
   if(!isFuture && !effDay.pregnancy){
@@ -833,6 +948,17 @@ function updateWorkoutBody(){
   }
 
   body.innerHTML = html;
+
+  var skipBtn = document.getElementById('skipDayBtn');
+  if(skipBtn){
+    skipBtn.addEventListener('click', function(){
+      skipDay(selectedDate);
+      persist();
+      updateWorkoutBody();
+      updateStreakPill();
+      refreshStripMarks();
+    });
+  }
 
   if(!isFuture){
     body.querySelectorAll('.exercise').forEach(function(row){
@@ -935,6 +1061,17 @@ function renderSchedule(){
   });
   html += '</div><p class="small-muted" style="margin:12px 0 0 0;">'+prog.blurb+'</p></div>';
 
+  var curDays = getTrainingDays(state.phase);
+  html += '<div class="card"><h3>Training Days</h3>'+
+    '<p class="small-muted" style="margin:0 0 10px 0;">Pick '+state.phase+' day'+(state.phase>1?'s':'')+' a week. The rest become rest days.</p>'+
+    '<div class="chip-row" id="dayPickerRow">';
+  [0,1,2,3,4,5,6].forEach(function(wd){
+    html += '<div class="chip'+(curDays.indexOf(wd)!==-1?' active':'')+'" data-wd="'+wd+'">'+WEEKDAY_NAMES[wd].slice(0,3)+'</div>';
+  });
+  html += '</div><button class="btn secondary small" id="saveDaysBtn" style="margin-top:10px;">Save Days</button>'+
+    '<p class="small-muted" id="dayPickerMsg" style="margin-top:8px;"></p>'+
+  '</div>';
+
   var note = safetyNote(state.profile);
   if(note){
     html += '<div class="tip" style="border-color:rgba(245,165,36,.35); background:rgba(245,165,36,.08); color:#ffe3b0;"><b>Before you start:</b> '+note+'</div>';
@@ -962,6 +1099,34 @@ function renderSchedule(){
       renderAll();
     });
   });
+
+  var dayPickerRow = document.getElementById('dayPickerRow');
+  var dayMsg = document.getElementById('dayPickerMsg');
+  if(dayPickerRow){
+    dayPickerRow.querySelectorAll('.chip').forEach(function(c){
+      c.addEventListener('click', function(){
+        c.classList.toggle('active');
+        var count = dayPickerRow.querySelectorAll('.chip.active').length;
+        dayMsg.textContent = count === state.phase ? '' : ('Selected '+count+' of '+state.phase+' — pick exactly '+state.phase+' to save.');
+      });
+    });
+  }
+  var saveDaysBtn = document.getElementById('saveDaysBtn');
+  if(saveDaysBtn){
+    saveDaysBtn.addEventListener('click', function(){
+      var picked = [];
+      dayPickerRow.querySelectorAll('.chip.active').forEach(function(c){ picked.push(parseInt(c.getAttribute('data-wd'))); });
+      picked.sort(function(a,b){ return a-b; });
+      if(picked.length !== state.phase){
+        dayMsg.textContent = 'Pick exactly '+state.phase+' day'+(state.phase>1?'s':'')+' before saving.';
+        return;
+      }
+      if(!state.customDays) state.customDays = {};
+      state.customDays[state.phase] = picked;
+      persist();
+      renderAll();
+    });
+  }
 }
 
 /* ---------------------------------------------------------------------
@@ -1192,11 +1357,14 @@ function renderHeatmap(){
   for(var i=days-1; i>=0; i--){
     var d = new Date(today); d.setDate(today.getDate()-i);
     var ds = todayStr(d);
-    var scheduled = isScheduled(ds, state.phase);
+    var normally = isScheduled(ds, state.phase);
+    var log = state.workouts[ds];
+    var skipped = normally && log && log.skipped;
+    var scheduled = isEffectivelyScheduled(ds);
     var cls = 'cell';
     if(d > today) cls += ' future';
+    else if(skipped) cls += ' skipped';
     else if(scheduled){
-      var log = state.workouts[ds];
       if(log && log.done) cls += ' done';
       else if(d < today) cls += ' missed';
     }
@@ -1298,6 +1466,7 @@ function renderProfile(){
   el.innerHTML = html;
 
   document.getElementById('saveProfileBtn').addEventListener('click', function(){
+    var btn = document.getElementById('saveProfileBtn');
     p.name = document.getElementById('pName').value;
     p.age = parseInt(document.getElementById('pAge').value) || p.age;
     p.heightCm = parseFloat(document.getElementById('pHeight').value) || p.heightCm;
@@ -1312,11 +1481,14 @@ function renderProfile(){
     p.trainingTime = document.getElementById('pTime').value;
     p.activityLevel = document.getElementById('pActivity').value;
     persist();
-    renderAll();
+    btn.textContent = 'Saved';
+    btn.disabled = true;
+    btn.style.opacity = '0.75';
+    setTimeout(function(){ renderAll(); }, 600);
   });
 
   document.getElementById('exportBtn').addEventListener('click', function(){
-    var data = JSON.stringify({profile:state.profile, phase:state.phase, workouts:state.workouts, weights:state.weights, strengthLogs:state.strengthLogs}, null, 2);
+    var data = JSON.stringify({profile:state.profile, phase:state.phase, workouts:state.workouts, weights:state.weights, strengthLogs:state.strengthLogs, customDays:state.customDays, makeups:state.makeups}, null, 2);
     var blob = new Blob([data], {type:'application/json'});
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
@@ -1332,11 +1504,15 @@ function renderProfile(){
       localStorage.removeItem(KEYS.workouts);
       localStorage.removeItem(KEYS.weights);
       localStorage.removeItem(KEYS.strengthLogs);
+      localStorage.removeItem(KEYS.customDays);
+      localStorage.removeItem(KEYS.makeups);
       state.profile = JSON.parse(JSON.stringify(defaultProfile));
       state.phase = 3;
       state.workouts = {};
       state.weights = [{date: todayStr(), kg: 100}];
       state.strengthLogs = {};
+      state.customDays = {};
+      state.makeups = {};
       persist();
       renderAll();
     }
