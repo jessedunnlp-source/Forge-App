@@ -111,6 +111,24 @@ p.page-sub{color:var(--muted); font-size:14px; margin:0 0 18px 0; line-height:1.
 .exercise .info b{display:block; font-size:15px; transition:all .12s ease;}
 .exercise .info span{color:var(--muted); font-size:13px;}
 .exercise.checked .info b{color:var(--muted); text-decoration:line-through; text-decoration-color:var(--border);}
+.exercise .info{flex:1;}
+.log-chip{
+  flex:0 0 auto; align-self:center; padding:6px 10px; border-radius:999px; background:var(--card2);
+  border:1px solid var(--border); font-size:11.5px; font-weight:800; color:var(--muted);
+}
+.log-chip.logged{background:rgba(249,115,22,.14); border-color:var(--accent); color:var(--accent);}
+.log-form{background:var(--card2); border-radius:12px; padding:12px; margin:0 0 12px 0;}
+.chip-row{display:flex; flex-wrap:wrap; gap:8px;}
+.chip{
+  padding:9px 13px; border-radius:999px; background:var(--card2); border:1px solid var(--border);
+  font-size:12.5px; font-weight:700; color:var(--muted); cursor:pointer; transition:transform .1s ease;
+}
+.chip:active{transform:scale(.95);}
+.chip.active{background:rgba(249,115,22,.14); border-color:var(--accent); color:var(--accent);}
+select{
+  width:100%; background:var(--card2); border:1px solid var(--border); color:var(--text);
+  padding:12px; border-radius:10px; font-size:15px; margin-top:6px; -webkit-appearance:none; appearance:none;
+}
 .block-label{
   display:inline-block; font-size:11px; font-weight:800; letter-spacing:.05em; text-transform:uppercase;
   padding:3px 9px; border-radius:999px; margin:16px 0 6px 0;
@@ -199,7 +217,7 @@ window.addEventListener('error', function(e){
 /* ---------------------------------------------------------------------
    DATA MODEL
 --------------------------------------------------------------------- */
-var KEYS = { profile:'ir_profile_v1', phase:'ir_phase_v1', workouts:'ir_workouts_v1', weights:'ir_weights_v1' };
+var KEYS = { profile:'ir_profile_v1', phase:'ir_phase_v1', workouts:'ir_workouts_v1', weights:'ir_weights_v1', strengthLogs:'ir_strength_v1' };
 
 function todayStr(d){ d = d || new Date(); var y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), day=String(d.getDate()).padStart(2,'0'); return y+'-'+m+'-'+day; }
 function parseDate(s){ var p=s.split('-'); return new Date(parseInt(p[0]),parseInt(p[1])-1,parseInt(p[2])); }
@@ -211,15 +229,21 @@ function loadJSON(key, fallback){
 function saveJSON(key, val){ try{ localStorage.setItem(key, JSON.stringify(val)); }catch(e){ /* storage unavailable — app still works, just won't persist */ } }
 
 var defaultProfile = {
-  name:'', age:32, heightCm:184, startWeight:100, goalWeight:null,
-  startDate: todayStr()
+  name:'', age:32, heightCm:184, startWeight:100, goalWeight:null, startDate: todayStr(),
+  lifeStage:'adult',       // 'teen' | 'adult' | 'older' | 'pregnant'
+  fitnessLevel:'beginner', // 'beginner' | 'intermediate' | 'advanced'
+  goal:'general',          // 'general' | 'weightloss' | 'muscle' | 'flexibility'
+  equipment:'gym',         // 'gym' | 'home' | 'body'
+  trainingTime:'morning',  // 'morning' | 'midday' | 'evening' | 'flexible'
+  activityLevel:'desk'     // 'desk' | 'onfeet' | 'demanding'
 };
 
 var state = {
-  profile: loadJSON(KEYS.profile, defaultProfile),
+  profile: Object.assign({}, defaultProfile, loadJSON(KEYS.profile, {})),
   phase: loadJSON(KEYS.phase, 3),
-  workouts: loadJSON(KEYS.workouts, {}),   // { '2026-07-09': {done:true, phase:3, dayIdx:0, checks:[true,false]} }
-  weights: loadJSON(KEYS.weights, [{date: todayStr(), kg: 100}])
+  workouts: loadJSON(KEYS.workouts, {}),   // { '2026-07-09': {done, checks[], adjustment, equipOverride, health:{cal,min,hr}} }
+  weights: loadJSON(KEYS.weights, [{date: todayStr(), kg: 100}]),
+  strengthLogs: loadJSON(KEYS.strengthLogs, {}) // { squat: [{date, weight, reps, name}] }
 };
 
 function persist(){
@@ -227,108 +251,245 @@ function persist(){
   saveJSON(KEYS.phase, state.phase);
   saveJSON(KEYS.workouts, state.workouts);
   saveJSON(KEYS.weights, state.weights);
+  saveJSON(KEYS.strengthLogs, state.strengthLogs);
 }
 
 /* ---------------------------------------------------------------------
-   PROGRAM: exercises for 3 / 4 / 5 day schedules, built for a home gym
-   with treadmill, dumbbells, cable machine, bench, squat rack + barbell.
-   Sessions target ~40-50 min for an early-morning slot.
-   weekdays: 0=Sun 1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat
+   ADAPTIVE PROGRAM ENGINE
+   Instead of one fixed program, sessions are generated from the profile:
+   life stage (safety), fitness level (load), goal (emphasis), and
+   equipment (exercise picks). weekday patterns stay fixed per day-count.
 --------------------------------------------------------------------- */
-function ex(name, detail, note){ return {name:name, detail:detail, note:note||''}; }
+function ex(name, detail, note, slot){ return {name:name, detail:detail, note:note||'', slot:slot||null}; }
 
-var PROGRAM = {
-  3: {
-    label: '3-Day · Foundation',
-    weekdays: [1,3,5],
-    blurb: 'Full-body strength three mornings a week. Builds the base — consistency first.',
-    days: [
-      { title:'Full Body A', focus:'Squat & Push', blocks:[
-        {type:'warmup', label:'Warm-up · 5 min', items:[ex('Arm circles','2 x 10 each direction'), ex('Bodyweight squats','15 reps'), ex('Cat-Cow','10 reps'), ex('Hip circles','10 each side')]},
-        {type:'strength', label:'Strength · 30 min', items:[ex('Barbell Back Squat','4 sets x 8 reps'), ex('Flat Bench Press','3 x 8'), ex('Seated Cable Row','3 x 10'), ex('Standing DB Overhead Press','3 x 10'), ex('Plank','3 x 40 sec')]},
-        {type:'cardio', label:'Cardio Finisher · 8 min', items:[ex('Treadmill Intervals','1 min brisk / 1 min walk x 4')]},
-        {type:'flex', label:'Cooldown Stretch · 5 min', items:[ex('Hip flexor stretch','30 sec/side'), ex('Hamstring stretch','30 sec/side'), ex('Doorway chest stretch','30 sec')]}
-      ]},
-      { title:'Full Body B', focus:'Hinge & Pull', blocks:[
-        {type:'warmup', label:'Warm-up · 5 min', items:[ex('Leg swings','10 each leg'), ex('Glute bridges','12 reps'), ex('Band/arm pull-aparts','15 reps'), ex('Thoracic rotations','10 each side')]},
-        {type:'strength', label:'Strength · 30 min', items:[ex('Barbell Deadlift','4 x 6'), ex('Lat Pulldown (cable)','3 x 10'), ex('DB Walking Lunge','3 x 10/leg'), ex('DB Shoulder Press','3 x 10'), ex('Cable Face Pull','3 x 15')]},
-        {type:'cardio', label:'Cardio · 10 min', items:[ex('Treadmill incline walk','Incline 8-10%, steady pace')]},
-        {type:'flex', label:'Cooldown Stretch · 5 min', items:[ex('Quad stretch','30 sec/side'), ex('Lat stretch','30 sec/side'), ex('Seated forward fold','45 sec')]}
-      ]},
-      { title:'Full Body C', focus:'Conditioning + Flexibility', blocks:[
-        {type:'warmup', label:'Warm-up · 5 min', items:[ex('Jumping jacks','30 reps'), ex("World's greatest stretch",'5/side'), ex('Bodyweight good mornings','10 reps')]},
-        {type:'strength', label:'Strength · 25 min', items:[ex('Goblet / Front Squat','3 x 10'), ex('Incline DB Press','3 x 10'), ex('Cable Lat Pulldown','3 x 10'), ex('DB Curl + Cable Pushdown (superset)','3 x 12 each')]},
-        {type:'cardio', label:'HIIT Finisher · 10 min', items:[ex('Treadmill sprint intervals','30 sec sprint / 90 sec walk x 5')]},
-        {type:'flex', label:'Extended Flexibility Flow · 10 min', items:[ex('Hip flexor + hamstring + quad stretch','30-45 sec each'), ex('Chest + shoulder stretch','30-45 sec each'), ex('Seated spinal twist','30 sec/side')]}
-      ]}
-    ]
-  },
-  4: {
-    label: '4-Day · Upper / Lower',
-    weekdays: [1,2,4,5],
-    blurb: 'Split into lower and upper sessions so you can add volume without adding fatigue.',
-    days: [
-      { title:'Lower Body', focus:'Strength', blocks:[
-        {type:'warmup', label:'Warm-up · 5 min', items:[ex('Bodyweight squats','15 reps'), ex('Leg swings','10/leg'), ex('Glute bridges','15 reps'), ex('Ankle circles','10/side')]},
-        {type:'strength', label:'Strength · 35 min', items:[ex('Barbell Back Squat','4 x 8'), ex('Romanian Deadlift','3 x 10'), ex('DB Walking Lunge','3 x 10/leg'), ex('Bulgarian Split Squat (bench)','3 x 10/leg'), ex('Standing Calf Raise','3 x 15'), ex('Cable Woodchopper','3 x 12/side')]},
-        {type:'flex', label:'Cooldown Stretch · 5 min', items:[ex('Hip flexor stretch','30 sec/side'), ex('Hamstring stretch','30 sec/side'), ex('Quad stretch','30 sec/side')]}
-      ]},
-      { title:'Upper Body', focus:'Strength', blocks:[
-        {type:'warmup', label:'Warm-up · 5 min', items:[ex('Arm circles','10 each way'), ex('Band pull-aparts','15 reps'), ex('Push-up to downdog','8 reps')]},
-        {type:'strength', label:'Strength · 35 min', items:[ex('Barbell/DB Bench Press','4 x 8'), ex('Seated Cable Row','3 x 10'), ex('Standing Overhead Press','3 x 10'), ex('Lat Pulldown','3 x 10'), ex('DB Lateral Raise','3 x 12'), ex('Cable Pushdown + DB Curl (superset)','3 x 12')]},
-        {type:'flex', label:'Cooldown Stretch · 5 min', items:[ex('Chest stretch','30 sec'), ex('Lat stretch','30 sec/side'), ex('Shoulder cross-body stretch','30 sec/side')]}
-      ]},
-      { title:'Lower Body', focus:'Strength + Conditioning', blocks:[
-        {type:'warmup', label:'Warm-up · 5 min', items:[ex('Leg swings','10/leg'), ex('Bodyweight squats','15 reps'), ex('Hip circles','10/side')]},
-        {type:'strength', label:'Strength · 25 min', items:[ex('Barbell Deadlift','4 x 6'), ex('Goblet Squat','3 x 12'), ex('DB Step-up (bench)','3 x 10/leg'), ex('Plank + Side Plank','3 x 30-40 sec')]},
-        {type:'cardio', label:'HIIT · 12 min', items:[ex('Treadmill sprint intervals','30 sec sprint / 90 sec walk x 6')]},
-        {type:'flex', label:'Cooldown Stretch · 5 min', items:[ex('Hamstring + hip flexor stretch','30-45 sec each')]}
-      ]},
-      { title:'Upper Body', focus:'Strength + Flexibility', blocks:[
-        {type:'warmup', label:'Warm-up · 5 min', items:[ex('Arm circles','10 each way'), ex('Band pull-aparts','15 reps')]},
-        {type:'strength', label:'Strength · 25 min', items:[ex('Incline DB Press','3 x 10'), ex('Assisted Pull-up / Cable Row','3 x 10'), ex('DB Arnold Press','3 x 10'), ex('Cable Face Pull','3 x 15')]},
-        {type:'cardio', label:'Cardio · 5 min', items:[ex('Treadmill incline walk','Moderate pace')]},
-        {type:'flex', label:'Extended Flexibility Flow · 10 min', items:[ex('Full-body stretch circuit','Chest, lats, shoulders, hips, hamstrings — 30-45 sec each')]}
-      ]}
-    ]
-  },
-  5: {
-    label: '5-Day · Push / Pull / Legs+',
-    weekdays: [1,2,3,4,5],
-    blurb: 'Every weekday. Highest muscle-building volume — move here once 4 days feels easy.',
-    days: [
-      { title:'Push', focus:'Chest, Shoulders, Triceps', blocks:[
-        {type:'warmup', label:'Warm-up · 5 min', items:[ex('Arm circles','10 each way'), ex('Push-up to downdog','8 reps'), ex('Band pull-aparts','15 reps')]},
-        {type:'strength', label:'Strength · 35 min', items:[ex('Barbell Bench Press','4 x 8'), ex('Standing Overhead Press','3 x 8'), ex('Incline DB Press','3 x 10'), ex('DB Lateral Raise','3 x 12'), ex('Cable Tricep Pushdown','3 x 12')]},
-        {type:'flex', label:'Cooldown Stretch · 5 min', items:[ex('Chest + shoulder stretch','30-45 sec each')]}
-      ]},
-      { title:'Pull', focus:'Back, Biceps', blocks:[
-        {type:'warmup', label:'Warm-up · 5 min', items:[ex('Thoracic rotations','10/side'), ex('Band pull-aparts','15 reps'), ex('Cat-Cow','10 reps')]},
-        {type:'strength', label:'Strength · 35 min', items:[ex('Barbell Deadlift','4 x 6'), ex('Lat Pulldown','3 x 10'), ex('Seated Cable Row','3 x 10'), ex('Cable Face Pull','3 x 15'), ex('DB Bicep Curl','3 x 12')]},
-        {type:'flex', label:'Cooldown Stretch · 5 min', items:[ex('Lat stretch','30 sec/side'), ex('Hamstring stretch','30 sec/side')]}
-      ]},
-      { title:'Legs', focus:'Squat & Hinge', blocks:[
-        {type:'warmup', label:'Warm-up · 5 min', items:[ex('Bodyweight squats','15 reps'), ex('Leg swings','10/leg'), ex('Ankle circles','10/side')]},
-        {type:'strength', label:'Strength · 35 min', items:[ex('Barbell Back Squat','4 x 8'), ex('Romanian Deadlift','3 x 10'), ex('DB Walking Lunge','3 x 10/leg'), ex('Standing Calf Raise','3 x 15'), ex('Plank','3 x 45 sec')]},
-        {type:'flex', label:'Cooldown Stretch · 5 min', items:[ex('Quad + hip flexor stretch','30-45 sec each')]}
-      ]},
-      { title:'Upper Hypertrophy', focus:'+ Core', blocks:[
-        {type:'warmup', label:'Warm-up · 5 min', items:[ex('Arm circles','10 each way'), ex('Band pull-aparts','15 reps')]},
-        {type:'strength', label:'Strength · 30 min', items:[ex('DB Bench Press','3 x 12'), ex('Cable Row','3 x 12'), ex('DB Shoulder Press','3 x 12'), ex('DB Curl + Cable Pushdown (superset)','3 x 12'), ex('Cable Woodchopper','3 x 12/side')]},
-        {type:'cardio', label:'Cardio Finisher · 10 min', items:[ex('Treadmill intervals','1 min brisk / 1 min walk x 5')]},
-        {type:'flex', label:'Cooldown Stretch · 5 min', items:[ex('Full-body stretch','30 sec each')]}
-      ]},
-      { title:'Lower + Conditioning', focus:'+ Flexibility', blocks:[
-        {type:'warmup', label:'Warm-up · 5 min', items:[ex('Leg swings','10/leg'), ex('Bodyweight squats','15 reps')]},
-        {type:'strength', label:'Strength · 20 min', items:[ex('Goblet Squat','3 x 12'), ex('Bulgarian Split Squat','3 x 10/leg'), ex('DB Hip Thrust (bench)','3 x 12')]},
-        {type:'cardio', label:'HIIT · 10 min', items:[ex('Treadmill sprint intervals','30 sec sprint / 90 sec walk x 5')]},
-        {type:'flex', label:'Extended Flexibility Flow · 15 min', items:[ex('Full-body stretch circuit','Hips, hamstrings, quads, chest, shoulders, spine — 30-45 sec each')]}
-      ]}
-    ]
-  }
+var WEEKDAYS_BY_PHASE = { 3:[1,3,5], 4:[1,2,4,5], 5:[1,2,3,4,5] };
+var WEEKDAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+var EQUIP_LABELS = { gym:'Full Gym', home:'Home (dumbbells/bands)', body:'Bodyweight Only' };
+
+// Movement catalog: one canonical "slot" key per movement pattern, with a
+// name for each equipment mode. Progress logging is tracked by slot key
+// so it stays consistent even if the exercise name changes day to day.
+var MOVES = {
+  squat:        { label:'Squat',           gym:'Barbell Back Squat',              home:'Dumbbell Goblet Squat',                       body:'Bodyweight Squat' },
+  hinge:        { label:'Hip Hinge',        gym:'Barbell Deadlift',                home:'Dumbbell Romanian Deadlift',                  body:'Glute Bridge' },
+  lunge:        { label:'Lunge',            gym:'Dumbbell Walking Lunge',          home:'Dumbbell Walking Lunge',                      body:'Bodyweight Walking Lunge' },
+  splitSquat:   { label:'Split Squat',      gym:'Bulgarian Split Squat (bench)',   home:'Bulgarian Split Squat (chair)',               body:'Bodyweight Split Squat' },
+  hipThrust:    { label:'Hip Thrust',       gym:'Barbell Hip Thrust',              home:'Dumbbell Hip Thrust',                         body:'Bodyweight Hip Thrust' },
+  calf:         { label:'Calf Raise',       gym:'Standing Calf Raise (machine)',   home:'Dumbbell Calf Raise',                         body:'Bodyweight Calf Raise' },
+  pressHoriz:   { label:'Horizontal Press', gym:'Barbell Bench Press',             home:'Dumbbell Floor Press',                        body:'Push-Up' },
+  pressVert:    { label:'Overhead Press',   gym:'Standing Barbell Overhead Press', home:'Dumbbell Shoulder Press',                     body:'Pike Push-Up' },
+  pullHoriz:    { label:'Row',              gym:'Seated Cable Row',                home:'Dumbbell Bent-Over Row',                      body:'Towel Row (door anchor)' },
+  pullVert:     { label:'Pulldown',         gym:'Lat Pulldown',                    home:'Resistance Band Pulldown',                    body:'Doorframe Assisted Row' },
+  armIso:       { label:'Arms',             gym:'Cable Pushdown + DB Curl (superset)', home:'DB Curl + Overhead Tricep Ext (superset)', body:'Diamond Push-Up + Chair Dip (superset)' },
+  lateralRaise: { label:'Shoulders',        gym:'Dumbbell Lateral Raise',          home:'Dumbbell Lateral Raise',                      body:'Pike-to-Y Raise' },
+  core:         { label:'Core',             gym:'Cable Woodchopper',               home:'Dumbbell Russian Twist',                      body:'Bicycle Crunch' },
+  plank:        { label:'Plank',            gym:'Plank',                           home:'Plank',                                       body:'Plank' }
 };
 
-var WEEKDAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+var CARDIO = {
+  gym:  [ {name:'Treadmill Steady Walk', impact:1}, {name:'Treadmill Incline Walk', impact:1}, {name:'Treadmill Intervals', impact:2}, {name:'Treadmill Sprint Intervals', impact:3} ],
+  home: [ {name:'Brisk Walk / March in Place', impact:1}, {name:'Step-Ups on Stair', impact:2}, {name:'Jumping Jack Intervals', impact:3} ],
+  body: [ {name:'Brisk Outdoor Walk', impact:1}, {name:'Bodyweight Cardio Circuit', impact:2}, {name:'High-Knee / Jump Intervals', impact:3} ]
+};
+
+var FLEX_POOL = ['Hip flexor stretch','Hamstring stretch','Cat-Cow','Doorway chest stretch','Seated spinal twist','Quad stretch','Ankle circles','Shoulder cross-body stretch',"Child's pose",'Lat stretch','Calf stretch','Neck rolls'];
+var WARMUP_POOL = ['Arm circles','Leg swings','Bodyweight squats (easy pace)','Glute bridges','Hip circles','Cat-Cow','Band/arm pull-aparts','Thoracic rotations','Ankle circles','March in place'];
+
+var LEVEL_SETSREPS = {
+  beginner:     { main:'3 x 8-10, light-moderate load', accessory:'2 x 10-12', core:'2 x 20-30 sec' },
+  intermediate: { main:'4 x 8', accessory:'3 x 10', core:'3 x 30-40 sec' },
+  advanced:     { main:'4-5 x 6-8, push load once form is solid', accessory:'3 x 12', core:'3 x 45-60 sec' }
+};
+function setsReps(level, tier){ var lvl = LEVEL_SETSREPS[level] || LEVEL_SETSREPS.beginner; return lvl[tier] || lvl.accessory; }
+
+// Older adults default to the gentlest scheme regardless of self-rated level (safety-first).
+// Teens are capped below "advanced" — technique over max loads.
+function effectiveLevel(profile){
+  if(profile.lifeStage==='older') return 'beginner';
+  if(profile.lifeStage==='teen') return profile.fitnessLevel==='advanced' ? 'intermediate' : profile.fitnessLevel;
+  return profile.fitnessLevel;
+}
+
+function maxImpactFor(profile){
+  if(profile.lifeStage==='pregnant') return 1;
+  if(profile.lifeStage==='older') return 1;
+  if(profile.goal==='flexibility') return 1;
+  if(profile.lifeStage==='teen') return 2;
+  return 3;
+}
+
+function pickCardio(profile, tier){
+  var pool = CARDIO[profile.equipment] || CARDIO.gym;
+  var cap = maxImpactFor(profile);
+  var eligible = pool.filter(function(c){ return c.impact <= cap; });
+  if(!eligible.length) eligible = [pool[0]];
+  var idx = tier==='high' ? eligible.length-1 : (tier==='mid' ? Math.min(1, eligible.length-1) : 0);
+  return eligible[idx];
+}
+
+var GOALS = {
+  general:     { label:'General Fitness & Stay Active', cardioMin:10, cardioTier:'mid',  flexMin:6 },
+  weightloss:  { label:'Lose Weight',                    cardioMin:14, cardioTier:'high', flexMin:6 },
+  muscle:      { label:'Build Muscle',                   cardioMin:8,  cardioTier:'low',  flexMin:5 },
+  flexibility: { label:'Flexibility & Mobility',          cardioMin:6,  cardioTier:'low',  flexMin:12 }
+};
+
+var ARCHETYPES = {
+  fullA:         { title:'Full Body A', focus:'Squat & Push',            slots:[['squat','main'],['pressHoriz','main'],['pullHoriz','accessory'],['core','core']] },
+  fullB:         { title:'Full Body B', focus:'Hinge & Pull',            slots:[['hinge','main'],['pullVert','main'],['lunge','accessory'],['pressVert','accessory']] },
+  fullC:         { title:'Full Body C', focus:'Conditioning',            slots:[['squat','accessory'],['pressHoriz','accessory'],['pullVert','accessory'],['armIso','accessory']], extraCardio:true, extraFlex:true },
+  lower:         { title:'Lower Body',  focus:'Strength',                slots:[['squat','main'],['hinge','accessory'],['lunge','accessory'],['calf','accessory'],['core','core']] },
+  upper:         { title:'Upper Body',  focus:'Strength',                slots:[['pressHoriz','main'],['pullHoriz','accessory'],['pressVert','accessory'],['pullVert','accessory']] },
+  lowerCond:     { title:'Lower Body',  focus:'Strength + Conditioning', slots:[['hinge','main'],['squat','accessory'],['splitSquat','accessory'],['plank','core']], extraCardio:true },
+  upperFlex:     { title:'Upper Body',  focus:'Strength + Flexibility',  slots:[['pressHoriz','accessory'],['pullVert','accessory'],['pressVert','accessory'],['lateralRaise','accessory']], extraFlex:true },
+  push:          { title:'Push',        focus:'Chest, Shoulders, Triceps', slots:[['pressHoriz','main'],['pressVert','main'],['lateralRaise','accessory'],['armIso','accessory']] },
+  pull:          { title:'Pull',        focus:'Back, Biceps',            slots:[['hinge','main'],['pullVert','main'],['pullHoriz','accessory'],['armIso','accessory']] },
+  legs:          { title:'Legs',        focus:'Squat & Hinge',           slots:[['squat','main'],['hinge','accessory'],['lunge','accessory'],['calf','accessory'],['plank','core']] },
+  upperHyp:      { title:'Upper Hypertrophy', focus:'+ Core',            slots:[['pressHoriz','accessory'],['pullHoriz','accessory'],['pressVert','accessory'],['armIso','accessory'],['core','core']], extraCardio:true },
+  lowerCondFlex: { title:'Lower + Conditioning', focus:'+ Flexibility',  slots:[['squat','accessory'],['splitSquat','accessory'],['hipThrust','accessory']], extraCardio:true, extraFlex:true }
+};
+var ARCHETYPE_KEYS = Object.keys(ARCHETYPES);
+var DAY_SHAPES = { 3:['fullA','fullB','fullC'], 4:['lower','upper','lowerCond','upperFlex'], 5:['push','pull','legs','upperHyp','lowerCondFlex'] };
+
+function buildStrengthItem(slot, profile){
+  var key = slot[0], tier = slot[1];
+  var move = MOVES[key];
+  var name = move[profile.equipment] || move.gym;
+  var detail = setsReps(effectiveLevel(profile), tier);
+  return ex(name, detail, '', key);
+}
+
+function buildDay(shapeKey, profile){
+  var arch = ARCHETYPES[shapeKey];
+  var goal = GOALS[profile.goal] || GOALS.general;
+  var cap = maxImpactFor(profile);
+  var shapeIdx = ARCHETYPE_KEYS.indexOf(shapeKey);
+
+  var warm = [0,1,2,3].map(function(i){ return ex(WARMUP_POOL[(shapeIdx+i) % WARMUP_POOL.length], ''); });
+  var strengthItems = arch.slots.map(function(s){ return buildStrengthItem(s, profile); });
+
+  var blocks = [
+    {type:'warmup', label:'Warm-up · 5 min', items: warm},
+    {type:'strength', label:'Strength · '+(arch.slots.length>=5?'30-35':'20-25')+' min', items: strengthItems}
+  ];
+
+  if(cap >= 1){
+    var cMin = goal.cardioMin + (arch.extraCardio ? 4 : 0);
+    var cEx = pickCardio(profile, goal.cardioTier);
+    var cDetail = cEx.impact>=3 ? '30 sec effort / 90 sec easy x '+Math.max(4,Math.round(cMin/2))
+                : cEx.impact===2 ? 'Steady intervals, '+cMin+' min total'
+                : cMin+' min, easy conversational pace';
+    blocks.push({type:'cardio', label:(cEx.impact>=3?'HIIT Finisher':'Cardio')+' · '+cMin+' min', items:[ex(cEx.name, cDetail)]});
+  }
+
+  var fMin = goal.flexMin + (arch.extraFlex ? 5 : 0);
+  var flexCount = Math.max(3, Math.round(fMin/2.5));
+  var flexItems = [];
+  for(var i=0;i<flexCount;i++){ flexItems.push(ex(FLEX_POOL[(shapeIdx+i) % FLEX_POOL.length], '30-45 sec')); }
+  blocks.push({type:'flex', label:(arch.extraFlex?'Extended Flexibility Flow':'Cooldown Stretch')+' · '+fMin+' min', items: flexItems});
+
+  return { title: arch.title, focus: arch.focus, blocks: blocks };
+}
+
+// Pregnancy uses a separate, fixed, conservative template rather than the
+// generated engine — safety over variety. Cycles through 3 gentle sessions
+// regardless of day-count. Always requires a doctor's clearance (see safetyNote()).
+var PREGNANCY_DAYS = [
+  { title:'Gentle Full Body A', focus:'Light strength + walk', blocks:[
+    {type:'warmup', label:'Warm-up · 5 min', items:[ex('Ankle circles',''), ex('Arm circles, easy pace',''), ex('Standing Cat-Cow','')]},
+    {type:'strength', label:'Light Strength · 15-20 min', items:[
+      ex('Squat to Chair (bodyweight or light dumbbell)','2 x 10-12, controlled','','squat'),
+      ex('Standing Row (band or light dumbbell)','2 x 12','','pullHoriz'),
+      ex('Wall or Incline Push-Up','2 x 10','','pressHoriz'),
+      ex('Standing Pelvic Tilts','2 x 10, slow and controlled')
+    ]},
+    {type:'cardio', label:'Cardio · 10-15 min', items:[ex('Brisk Walk','Comfortable pace — should be able to hold a conversation')]},
+    {type:'flex', label:'Stretch · 10 min', items:[ex('Seated side stretch','30 sec/side'), ex('Gentle neck rolls','30 sec'), ex('Ankle circles','30 sec')]}
+  ]},
+  { title:'Gentle Full Body B', focus:'Light strength + walk', blocks:[
+    {type:'warmup', label:'Warm-up · 5 min', items:[ex('Shoulder rolls',''), ex('Marching in place, easy pace',''), ex('Standing hip circles','')]},
+    {type:'strength', label:'Light Strength · 15-20 min', items:[
+      ex('Standing Side Leg Raise','2 x 10/side','','lunge'),
+      ex('Seated Overhead Press (light dumbbell or band)','2 x 12','','pressVert'),
+      ex('Standing Wall Sit (short hold)','2 x 15-20 sec','','splitSquat'),
+      ex('Kegel / pelvic floor engagement','2 x 10, slow squeeze and release')
+    ]},
+    {type:'cardio', label:'Cardio · 10-15 min', items:[ex('Brisk Walk or Upright Stationary Bike','Comfortable, conversational pace')]},
+    {type:'flex', label:'Stretch · 10 min', items:[ex('Cat-Cow (comfortable range)','30 sec'), ex('Seated forward reach','30 sec'), ex('Chest opener stretch','30 sec')]}
+  ]},
+  { title:'Gentle Full Body C', focus:'Mobility + walk', blocks:[
+    {type:'warmup', label:'Warm-up · 5 min', items:[ex('Standing side bends',''), ex('Wrist and ankle circles','')]},
+    {type:'strength', label:'Light Strength · 10-15 min', items:[
+      ex('Standing Bicep Curl (light dumbbell or band)','2 x 12','','armIso'),
+      ex('Standing Calf Raise','2 x 15','','calf'),
+      ex('Standing Pelvic Tilts','2 x 10')
+    ]},
+    {type:'cardio', label:'Cardio · 15-20 min', items:[ex('Brisk Walk','Comfortable pace, longer session')]},
+    {type:'flex', label:'Prenatal Stretch Flow · 12 min', items:[ex('Seated butterfly stretch','45 sec'), ex('Gentle hip circles','45 sec'), ex('Deep breathing + relaxation','2 min')]}
+  ]}
+];
+
+function programBlurb(profile){
+  if(profile.lifeStage==='pregnant') return 'Gentle, doctor-cleared activity focused on staying comfortably active. Stop if you feel pain, dizziness, or shortness of breath.';
+  var g = GOALS[profile.goal] || GOALS.general;
+  var pieces = [g.label+' · '+EQUIP_LABELS[profile.equipment]+'.'];
+  if(profile.lifeStage==='teen') pieces.push('Built around technique over heavy loads.');
+  if(profile.lifeStage==='older') pieces.push('Low-impact and joint-friendly by default.');
+  return pieces.join(' ');
+}
+
+function buildProgram(profile, phase){
+  var shapes = DAY_SHAPES[phase];
+  var days = (profile.lifeStage==='pregnant')
+    ? shapes.map(function(_, i){ return PREGNANCY_DAYS[i % PREGNANCY_DAYS.length]; })
+    : shapes.map(function(shapeKey){ return buildDay(shapeKey, profile); });
+  var goalLabel = profile.lifeStage==='pregnant' ? 'Pregnancy-Safe' : (GOALS[profile.goal]||GOALS.general).label;
+  return { label: phase+'-Day · '+goalLabel, weekdays: WEEKDAYS_BY_PHASE[phase], blurb: programBlurb(profile), days: days };
+}
+
+function safetyNote(profile){
+  if(profile.lifeStage==='pregnant') return "Only continue exercise during pregnancy with your doctor's clearance. Avoid lying flat on your back after the first trimester, avoid contact or fall-risk moves, and stop immediately if you feel dizzy, short of breath, or notice pain or bleeding.";
+  if(profile.lifeStage==='older') return 'Move at a pace that feels controlled. Skip anything that causes pain, and check with a doctor before starting if you have a heart, joint, or balance condition.';
+  if(profile.lifeStage==='teen') return 'Focus on good form over heavy weight. Having an adult or coach nearby for the first few sessions is a good idea.';
+  return null;
+}
+
+/* ---------------------------------------------------------------------
+   PER-DAY ADJUSTMENTS: Sore/Easy, More Cardio, More Weights, Standard
+--------------------------------------------------------------------- */
+function applyAdjustment(day, adjustment){
+  if(!adjustment || adjustment==='standard') return day;
+  var blocks = day.blocks.map(function(b){ return {type:b.type, label:b.label, items:b.items.slice()}; });
+
+  if(adjustment==='sore'){
+    blocks = blocks.filter(function(b){ return b.type!=='cardio'; }).map(function(b){
+      if(b.type==='strength'){
+        var trimmed = b.items.slice(0, Math.max(2, b.items.length-1));
+        return {type:'strength', label:'Light Strength (easy day)', items: trimmed.map(function(it){ return ex(it.name, '2 sets, light weight — stop if anything hurts', it.note, it.slot); })};
+      }
+      if(b.type==='flex'){ return {type:'flex', label:'Extra Recovery Stretch', items: b.items.concat([ex('Extra gentle stretch for whatever feels tight','1-2 min')])}; }
+      return b;
+    });
+  } else if(adjustment==='cardio'){
+    var hasCardio = blocks.some(function(b){ return b.type==='cardio'; });
+    if(hasCardio){
+      blocks = blocks.map(function(b){
+        if(b.type==='cardio'){ return {type:'cardio', label:b.label+' +extra', items: b.items.concat([ex('Extra Cardio','+10 min easy-to-moderate pace')])}; }
+        return b;
+      });
+    } else {
+      var insertAt = blocks.map(function(b){return b.type;}).indexOf('flex');
+      if(insertAt===-1) insertAt = blocks.length;
+      blocks.splice(insertAt, 0, {type:'cardio', label:'Cardio · 10 min', items:[ex('Steady Cardio','10 min easy-to-moderate pace')]});
+    }
+  } else if(adjustment==='weights'){
+    blocks = blocks.map(function(b){
+      if(b.type==='strength'){ return {type:'strength', label:b.label+' +extra', items: b.items.concat([ex('Extra Accessory Work','2 x 12, pick a muscle group that needs more volume')])}; }
+      return b;
+    });
+  }
+  return {title: day.title, focus: day.focus, blocks: blocks};
+}
 
 /* ---------------------------------------------------------------------
    HELPERS: schedule / streak / stats
@@ -336,20 +497,50 @@ var WEEKDAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday'
 function getDayInfo(dateStr){
   var d = parseDate(dateStr);
   var wd = d.getDay();
-  var prog = PROGRAM[state.phase];
-  var idx = prog.weekdays.indexOf(wd);
+  var idx = WEEKDAYS_BY_PHASE[state.phase].indexOf(wd);
   if(idx === -1) return null;
-  return { dayIdx: idx, day: prog.days[idx], date: dateStr };
+  var prog = buildProgram(state.profile, state.phase);
+  return { dayIdx: idx, day: prog.days[idx], date: dateStr, programLabel: prog.label };
+}
+
+function getEffectiveDay(dateStr){
+  var info = getDayInfo(dateStr);
+  if(!info) return null;
+  var log = state.workouts[dateStr];
+  var pregnancy = state.profile.lifeStage === 'pregnant';
+  var day = info.day;
+  if(!pregnancy && log && log.equipOverride && log.equipOverride !== state.profile.equipment){
+    var tempProfile = Object.assign({}, state.profile, {equipment: log.equipOverride});
+    var shapeKey = DAY_SHAPES[state.phase][info.dayIdx];
+    day = buildDay(shapeKey, tempProfile);
+  }
+  if(!pregnancy && log && log.adjustment){ day = applyAdjustment(day, log.adjustment); }
+  return { dayIdx: info.dayIdx, day: day, date: dateStr, programLabel: info.programLabel, pregnancy: pregnancy };
 }
 
 function isScheduled(dateStr, phase){
   var d = parseDate(dateStr);
-  return PROGRAM[phase].weekdays.indexOf(d.getDay()) !== -1;
+  return WEEKDAYS_BY_PHASE[phase].indexOf(d.getDay()) !== -1;
 }
 
 function scheduledDayIndex(dateStr, phase){
   var d = parseDate(dateStr);
-  return PROGRAM[phase].weekdays.indexOf(d.getDay());
+  return WEEKDAYS_BY_PHASE[phase].indexOf(d.getDay());
+}
+
+function getTodaysLog(slot, dateStr){
+  var arr = state.strengthLogs[slot];
+  if(!arr) return null;
+  for(var i=0;i<arr.length;i++){ if(arr[i].date===dateStr) return arr[i]; }
+  return null;
+}
+function upsertStrengthLog(slot, dateStr, weight, reps, exerciseName){
+  if(!state.strengthLogs[slot]) state.strengthLogs[slot] = [];
+  var arr = state.strengthLogs[slot];
+  var existing = null;
+  for(var i=0;i<arr.length;i++){ if(arr[i].date===dateStr){ existing = arr[i]; break; } }
+  if(existing){ existing.weight=weight; existing.reps=reps; existing.name=exerciseName; }
+  else { arr.push({date:dateStr, weight:weight, reps:reps, name:exerciseName}); }
 }
 
 // build list of scheduled dates from profile.startDate through today, using CURRENT phase pattern
@@ -402,7 +593,7 @@ function weekBounds(d){
 
 function weekProgress(){
   var wb = weekBounds();
-  var target = PROGRAM[state.phase].weekdays.length;
+  var target = WEEKDAYS_BY_PHASE[state.phase].length;
   var done = 0;
   var cur = new Date(wb.start);
   var today = new Date(); today.setHours(0,0,0,0);
@@ -447,6 +638,7 @@ document.querySelectorAll('.tabbar button').forEach(function(b){
    RENDER: WORKOUT (date strip + checklist for whichever day is selected)
 --------------------------------------------------------------------- */
 var selectedDate = todayStr();
+var openLogIdx = null; // which strength exercise's inline weight-log form is expanded
 var DOW_SHORT = ['Su','Mo','Tu','We','Th','Fr','Sa'];
 
 function dateStripRange(){
@@ -509,6 +701,7 @@ function buildDateStrip(){
   strip.querySelectorAll('.date-pill').forEach(function(pill){
     pill.addEventListener('click', function(){
       selectedDate = pill.getAttribute('data-date');
+      openLogIdx = null;
       strip.querySelectorAll('.date-pill').forEach(function(p){ p.classList.remove('active'); });
       pill.classList.add('active');
       scrollPillIntoView(pill);
@@ -528,19 +721,29 @@ function refreshStripMarks(){
   });
 }
 
+function inlineLogFormHtml(slot, flatIdx, wKey, exName){
+  var todays = getTodaysLog(slot, wKey);
+  return '<div class="log-form" data-flatidx="'+flatIdx+'">' +
+    '<div class="two-col">' +
+      '<div class="field"><label>Weight (kg)</label><input type="number" step="0.5" id="logW_'+flatIdx+'" value="'+(todays?todays.weight:'')+'"></div>' +
+      '<div class="field"><label>Reps</label><input type="number" id="logR_'+flatIdx+'" value="'+(todays?todays.reps:'')+'"></div>' +
+    '</div>' +
+    '<button class="btn small" data-savelog="'+flatIdx+'" data-slot2="'+slot+'" data-exname="'+exName+'">Save</button>' +
+  '</div>';
+}
+
 function updateWorkoutBody(){
   var body = document.getElementById('workoutBody');
-  var info = getDayInfo(selectedDate);
+  var effDay = getEffectiveDay(selectedDate);
   var d = parseDate(selectedDate);
   var dateLabel = d.toLocaleDateString(undefined,{weekday:'long', month:'long', day:'numeric'});
   var rel = relativeLabel(selectedDate);
   var today = todayStr();
   var isFuture = selectedDate > today;
-  var isPast = selectedDate < today;
 
   var subHtml = dateLabel + (rel ? ' <span class="badge">'+rel+'</span>' : '');
 
-  if(!info){
+  if(!effDay){
     body.innerHTML =
       '<p class="page-sub">'+subHtml+'</p>'+
       '<div class="card">'+
@@ -553,16 +756,16 @@ function updateWorkoutBody(){
   }
 
   var wKey = selectedDate;
-  var log = state.workouts[wKey] || {done:false, phase:state.phase, dayIdx:info.dayIdx, checks:[]};
+  var log = state.workouts[wKey] || {done:false, checks:[]};
   var flatItems = [];
-  info.day.blocks.forEach(function(b){ b.items.forEach(function(it){ flatItems.push(it); }); });
+  effDay.day.blocks.forEach(function(b){ b.items.forEach(function(it){ flatItems.push({item:it, blockType:b.type}); }); });
   if(!log.checks || log.checks.length !== flatItems.length){ log.checks = flatItems.map(function(){return false;}); }
 
   var doneCount = log.checks.filter(Boolean).length;
   var pct = Math.round((doneCount/flatItems.length)*100);
   var allDone = doneCount === flatItems.length;
 
-  var html = '<p class="page-sub">'+subHtml+' · '+info.day.title+' · '+info.day.focus+' <span class="badge">'+PROGRAM[state.phase].label+'</span></p>';
+  var html = '<p class="page-sub">'+subHtml+' · '+effDay.day.title+' · '+effDay.day.focus+' <span class="badge">'+effDay.programLabel+'</span></p>';
 
   if(isFuture){
     html += '<div class="tip"><b>Preview only —</b> this unlocks for ticking off on '+dateLabel+'.</div>';
@@ -572,16 +775,42 @@ function updateWorkoutBody(){
     html += '<div class="progress-wrap"><div class="progress-track"><div class="progress-fill" style="width:'+pct+'%"></div></div><span>'+doneCount+'/'+flatItems.length+'</span></div>';
   }
 
+  if(!isFuture && !effDay.pregnancy){
+    var adj = (log.adjustment) || 'standard';
+    var eq = log.equipOverride || state.profile.equipment;
+    var adjLabels = {standard:'Standard', sore:'Sore / Easy', cardio:'More Cardio', weights:'More Weights'};
+    var equipLabels = {gym:'Gym', home:'Home', body:'Bodyweight'};
+    html += '<div class="card"><h3>Adjust This Session</h3><div class="chip-row">';
+    ['standard','sore','cardio','weights'].forEach(function(a){
+      html += '<div class="chip'+(adj===a?' active':'')+'" data-adj="'+a+'">'+adjLabels[a]+'</div>';
+    });
+    html += '</div><div class="chip-row" style="margin-top:8px;">';
+    ['gym','home','body'].forEach(function(e2){
+      html += '<div class="chip'+(eq===e2?' active':'')+'" data-equip="'+e2+'">'+equipLabels[e2]+'</div>';
+    });
+    html += '</div></div>';
+  } else if(effDay.pregnancy){
+    html += '<div class="tip" style="border-color:rgba(245,165,36,.35); background:rgba(245,165,36,.08); color:#ffe3b0;"><b>Before you start:</b> '+safetyNote(state.profile)+'</div>';
+  }
+
   html += '<div class="card">';
   var flatIdx = 0;
-  info.day.blocks.forEach(function(b){
+  effDay.day.blocks.forEach(function(b){
     html += '<div class="block-label '+b.type+'">'+b.label+'</div>';
     b.items.forEach(function(it){
       var checked = log.checks[flatIdx];
+      var showLog = (b.type==='strength' && it.slot);
+      var chipHtml = '';
+      if(showLog){
+        var loggedToday = getTodaysLog(it.slot, wKey);
+        chipHtml = '<div class="log-chip'+(loggedToday?' logged':'')+'" data-flatidx="'+flatIdx+'" data-slot="'+it.slot+'" data-exname="'+it.name+'">'+(loggedToday ? loggedToday.weight+'kg' : 'Log')+'</div>';
+      }
       html += '<div class="exercise'+(isFuture?' disabled':'')+(checked?' checked':'')+'" data-idx="'+flatIdx+'">'+
         '<div class="chk'+(checked?' done':'')+'">'+(checked?'✓':'')+'</div>'+
         '<div class="info"><b>'+it.name+'</b><span>'+it.detail+'</span></div>'+
+        chipHtml+
       '</div>';
+      if(showLog && openLogIdx===flatIdx){ html += inlineLogFormHtml(it.slot, flatIdx, wKey, it.name); }
       flatIdx++;
     });
   });
@@ -589,6 +818,18 @@ function updateWorkoutBody(){
 
   if(!isFuture && doneCount > 0){
     html += '<button class="link-btn" id="resetChecksBtn">Reset checklist</button>';
+  }
+
+  if(!isFuture){
+    html += '<div class="card"><h3>Session Stats (optional)</h3>'+
+      '<div class="two-col">'+
+        '<div class="field"><label>Calories burned</label><input type="number" id="healthCal" value="'+(log.health&&log.health.cal||'')+'"></div>'+
+        '<div class="field"><label>Active minutes</label><input type="number" id="healthMin" value="'+(log.health&&log.health.min||'')+'"></div>'+
+      '</div>'+
+      '<div class="field"><label>Avg heart rate (bpm)</label><input type="number" id="healthHr" value="'+(log.health&&log.health.hr||'')+'"></div>'+
+      '<button class="btn secondary small" id="saveHealthBtn">Save</button>'+
+      '<p class="small-muted" style="margin-top:8px;">Type in numbers from Apple Health or your watch — a home-screen web app can\'t read that data automatically.</p>'+
+    '</div>';
   }
 
   body.innerHTML = html;
@@ -599,8 +840,6 @@ function updateWorkoutBody(){
         var idx = parseInt(row.getAttribute('data-idx'));
         log.checks[idx] = !log.checks[idx];
         log.done = log.checks.every(Boolean);
-        log.phase = state.phase;
-        log.dayIdx = info.dayIdx;
         state.workouts[wKey] = log;
         persist();
         updateWorkoutBody();
@@ -621,6 +860,63 @@ function updateWorkoutBody(){
         refreshStripMarks();
       });
     }
+    body.querySelectorAll('[data-adj]').forEach(function(c){
+      c.addEventListener('click', function(){
+        log.adjustment = c.getAttribute('data-adj');
+        state.workouts[wKey] = log;
+        persist();
+        openLogIdx = null;
+        updateWorkoutBody();
+      });
+    });
+    body.querySelectorAll('[data-equip]').forEach(function(c){
+      c.addEventListener('click', function(){
+        var e2 = c.getAttribute('data-equip');
+        log.equipOverride = (e2===state.profile.equipment) ? null : e2;
+        state.workouts[wKey] = log;
+        persist();
+        openLogIdx = null;
+        updateWorkoutBody();
+      });
+    });
+    body.querySelectorAll('.log-chip').forEach(function(chip){
+      chip.addEventListener('click', function(e){
+        e.stopPropagation();
+        var idx = parseInt(chip.getAttribute('data-flatidx'));
+        openLogIdx = (openLogIdx===idx) ? null : idx;
+        updateWorkoutBody();
+      });
+    });
+    body.querySelectorAll('[data-savelog]').forEach(function(btn){
+      btn.addEventListener('click', function(e){
+        e.stopPropagation();
+        var idx = btn.getAttribute('data-savelog');
+        var slot = btn.getAttribute('data-slot2');
+        var exName = btn.getAttribute('data-exname');
+        var wInput = document.getElementById('logW_'+idx);
+        var rInput = document.getElementById('logR_'+idx);
+        var weight = parseFloat(wInput.value);
+        var reps = parseInt(rInput.value);
+        if(!isNaN(weight)){
+          upsertStrengthLog(slot, wKey, weight, isNaN(reps)?null:reps, exName);
+          persist();
+        }
+        openLogIdx = null;
+        updateWorkoutBody();
+      });
+    });
+    var saveHealthBtn = document.getElementById('saveHealthBtn');
+    if(saveHealthBtn){
+      saveHealthBtn.addEventListener('click', function(){
+        var cal = parseFloat(document.getElementById('healthCal').value);
+        var min = parseFloat(document.getElementById('healthMin').value);
+        var hr = parseFloat(document.getElementById('healthHr').value);
+        log.health = { cal: isNaN(cal)?null:cal, min: isNaN(min)?null:min, hr: isNaN(hr)?null:hr };
+        state.workouts[wKey] = log;
+        persist();
+        updateWorkoutBody();
+      });
+    }
   }
 }
 
@@ -629,7 +925,7 @@ function updateWorkoutBody(){
 --------------------------------------------------------------------- */
 function renderSchedule(){
   var el = document.getElementById('view-schedule');
-  var prog = PROGRAM[state.phase];
+  var prog = buildProgram(state.profile, state.phase);
   var html = '<h1 class="page-title">Training Plan</h1>';
   html += '<p class="page-sub">Start at 3 days. Move up to 4, then 5, whenever you feel ready — consistency first, volume second.</p>';
 
@@ -638,6 +934,11 @@ function renderSchedule(){
     html += '<div class="pill'+(state.phase===p?' active':'')+'" data-phase="'+p+'">'+p+' day'+(p>1?'s':'')+'</div>';
   });
   html += '</div><p class="small-muted" style="margin:12px 0 0 0;">'+prog.blurb+'</p></div>';
+
+  var note = safetyNote(state.profile);
+  if(note){
+    html += '<div class="tip" style="border-color:rgba(245,165,36,.35); background:rgba(245,165,36,.08); color:#ffe3b0;"><b>Before you start:</b> '+note+'</div>';
+  }
 
   prog.days.forEach(function(day, i){
     var wd = WEEKDAY_NAMES[prog.weekdays[i]];
@@ -725,8 +1026,8 @@ function renderWeight(){
   drawWeightChart(sorted);
 }
 
-function drawWeightChart(sorted){
-  var canvas = document.getElementById('weightChart');
+function drawLineChart(canvasId, points, unit, emptyMsg){
+  var canvas = document.getElementById(canvasId);
   if(!canvas) return;
   var ctx = canvas.getContext && canvas.getContext('2d');
   if(!ctx) return;
@@ -736,16 +1037,17 @@ function drawWeightChart(sorted){
   ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,w,h);
 
-  if(sorted.length < 2){
+  if(points.length < 2){
     ctx.fillStyle = '#8992a5';
     ctx.font = '13px -apple-system,sans-serif';
-    ctx.fillText('Log at least two weigh-ins to see your trend', 8, h/2);
+    ctx.fillText(emptyMsg || 'Log at least two entries to see your trend', 8, h/2);
     return;
   }
 
-  var vals = sorted.map(function(s){return s.kg;});
+  var vals = points.map(function(s){return s.val;});
   var min = Math.min.apply(null, vals) - 1;
   var max = Math.max.apply(null, vals) + 1;
+  if(max===min){ max += 1; min -= 1; }
   var pad = 24;
   var plotW = w - pad*1.5, plotH = h - pad*1.5;
 
@@ -757,9 +1059,9 @@ function drawWeightChart(sorted){
   }
 
   ctx.beginPath();
-  sorted.forEach(function(s,i){
-    var x = 4 + (plotW-4) * (i/(sorted.length-1));
-    var y = 10 + plotH * (1 - (s.kg-min)/(max-min));
+  points.forEach(function(s,i){
+    var x = 4 + (plotW-4) * (i/(points.length-1));
+    var y = 10 + plotH * (1 - (s.val-min)/(max-min));
     if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
   });
   ctx.strokeStyle = '#f97316';
@@ -767,17 +1069,34 @@ function drawWeightChart(sorted){
   ctx.lineJoin='round';
   ctx.stroke();
 
-  sorted.forEach(function(s,i){
-    var x = 4 + (plotW-4) * (i/(sorted.length-1));
-    var y = 10 + plotH * (1 - (s.kg-min)/(max-min));
+  points.forEach(function(s,i){
+    var x = 4 + (plotW-4) * (i/(points.length-1));
+    var y = 10 + plotH * (1 - (s.val-min)/(max-min));
     ctx.beginPath(); ctx.arc(x,y,3,0,Math.PI*2);
     ctx.fillStyle = '#f97316'; ctx.fill();
   });
 
   ctx.fillStyle = '#8992a5';
   ctx.font = '11px -apple-system,sans-serif';
-  ctx.fillText(max.toFixed(0)+' kg', 4, 12);
-  ctx.fillText(min.toFixed(0)+' kg', 4, h-2);
+  ctx.fillText(max.toFixed(0)+(unit||''), 4, 12);
+  ctx.fillText(min.toFixed(0)+(unit||''), 4, h-2);
+}
+
+function drawWeightChart(sorted){
+  drawLineChart('weightChart', sorted.map(function(s){ return {val:s.kg}; }), ' kg', 'Log at least two weigh-ins to see your trend');
+}
+
+function weeklyHealthTotals(){
+  var wb = weekBounds();
+  var cal = 0, min = 0;
+  for(var ds in state.workouts){
+    var d = parseDate(ds);
+    if(d >= wb.start && d <= wb.end){
+      var h = state.workouts[ds].health;
+      if(h){ if(h.cal) cal += h.cal; if(h.min) min += h.min; }
+    }
+  }
+  return {cal:cal, min:min};
 }
 
 /* ---------------------------------------------------------------------
@@ -788,6 +1107,7 @@ function renderProgress(){
   var wp = weekProgress();
   var streak = currentStreak();
   var total = totalCompleted();
+  var health = weeklyHealthTotals();
 
   var html = '<h1 class="page-title">Progress</h1>';
   html += '<p class="page-sub">Hold yourself accountable — one session at a time.</p>';
@@ -798,6 +1118,13 @@ function renderProgress(){
     '<div style="text-align:right;"><div class="small-muted">All-time</div><div class="big-stat">'+total+'</div></div>'+
   '</div></div>';
 
+  if(health.cal > 0 || health.min > 0){
+    html += '<div class="card"><h3>This Week\'s Activity (self-logged)</h3><div class="row">'+
+      '<div><div class="small-muted">Calories burned</div><div class="big-stat" style="font-size:24px;">'+Math.round(health.cal)+'</div></div>'+
+      '<div style="text-align:right;"><div class="small-muted">Active minutes</div><div class="big-stat" style="font-size:24px;">'+Math.round(health.min)+'</div></div>'+
+    '</div><p class="small-muted" style="margin-top:8px;">From the Session Stats fields on the Workout tab, sourced from Apple Health or your watch.</p></div>';
+  }
+
   html += '<div class="card"><h3>Last 10 Weeks</h3><div class="heatmap" id="heatmap"></div>'+
     '<div class="row" style="margin-top:10px; font-size:11px; color:var(--muted);">'+
     '<span><span style="display:inline-block;width:9px;height:9px;background:var(--accent2);border-radius:2px;margin-right:4px;"></span>Done</span>'+
@@ -805,8 +1132,55 @@ function renderProgress(){
     '<span><span style="display:inline-block;width:9px;height:9px;background:var(--card2);border-radius:2px;margin-right:4px;"></span>Rest day</span>'+
     '</div></div>';
 
+  html += renderStrengthSectionHtml();
+
   el.innerHTML = html;
   renderHeatmap();
+  wireStrengthSection();
+}
+
+function loggedSlots(){
+  return Object.keys(state.strengthLogs).filter(function(k){ return state.strengthLogs[k] && state.strengthLogs[k].length > 0; });
+}
+
+function renderStrengthSectionHtml(){
+  var slots = loggedSlots();
+  if(!slots.length){
+    return '<div class="card"><h3>Strength Progress</h3><div class="empty-state"><div class="small-muted">Tap "Log" next to any strength exercise on the Workout tab to start tracking weight over time.</div></div></div>';
+  }
+  var html = '<div class="card"><h3>Strength Progress</h3>';
+  html += '<select id="strengthPicker">';
+  slots.forEach(function(s){
+    var label = (MOVES[s] && MOVES[s].label) || s;
+    html += '<option value="'+s+'">'+label+'</option>';
+  });
+  html += '</select>';
+  html += '<canvas id="strengthChart" height="150" style="margin-top:12px;"></canvas>';
+  html += '<div id="strengthStats" style="margin-top:10px;"></div>';
+  html += '</div>';
+  return html;
+}
+
+function renderStrengthChart(slot){
+  var entries = (state.strengthLogs[slot] || []).slice().sort(function(a,b){ return a.date < b.date ? -1 : 1; });
+  drawLineChart('strengthChart', entries.map(function(e){ return {val:e.weight}; }), ' kg', 'Log at least two sessions to see your trend');
+  var statsEl = document.getElementById('strengthStats');
+  if(!statsEl) return;
+  if(!entries.length){ statsEl.innerHTML=''; return; }
+  var latest = entries[entries.length-1];
+  var first = entries[0];
+  var best = entries.reduce(function(m,e){ return e.weight>m.weight?e:m; }, entries[0]);
+  var delta = latest.weight - first.weight;
+  statsEl.innerHTML = '<div class="row"><span class="small-muted">Latest</span><b>'+latest.weight+' kg'+(latest.reps?(' x '+latest.reps):'')+'</b></div>'+
+    '<div class="row" style="margin-top:6px;"><span class="small-muted">Best</span><b>'+best.weight+' kg</b></div>'+
+    '<div class="row" style="margin-top:6px;"><span class="small-muted">Change since first log</span><b style="color:'+(delta>=0?'var(--accent2)':'var(--danger)')+'">'+(delta>=0?'+':'')+delta.toFixed(1)+' kg</b></div>';
+}
+
+function wireStrengthSection(){
+  var picker = document.getElementById('strengthPicker');
+  if(!picker) return;
+  renderStrengthChart(picker.value);
+  picker.addEventListener('change', function(){ renderStrengthChart(picker.value); });
 }
 
 function renderHeatmap(){
@@ -839,6 +1213,10 @@ function isStandalone(){
   return (window.navigator.standalone === true) || !!mq;
 }
 
+function opt(value, label, current){
+  return '<option value="'+value+'"'+(value===current?' selected':'')+'>'+label+'</option>';
+}
+
 function renderProfile(){
   var el = document.getElementById('view-profile');
   var p = state.profile;
@@ -851,6 +1229,11 @@ function renderProfile(){
     html += '<div class="tip"><b>Save this to your Home Screen:</b> tap the Share icon in Safari, then "Add to Home Screen". Forge will open full-screen like a normal app and keep your data on this device.</div>';
   }
 
+  var note = safetyNote(p);
+  if(note){
+    html += '<div class="tip" style="border-color:rgba(245,165,36,.35); background:rgba(245,165,36,.08); color:#ffe3b0;"><b>Before you start:</b> '+note+'</div>';
+  }
+
   html += '<div class="card"><h3>You</h3>'+
     '<div class="field"><label>Name</label><input type="text" id="pName" value="'+(p.name||'')+'" placeholder="Optional"></div>'+
     '<div class="two-col">'+
@@ -861,8 +1244,40 @@ function renderProfile(){
       '<div class="field"><label>Starting weight (kg)</label><input type="number" step="0.1" id="pStartW" value="'+p.startWeight+'"></div>'+
       '<div class="field"><label>Goal weight (kg)</label><input type="number" step="0.1" id="pGoalW" value="'+(p.goalWeight||'')+'" placeholder="Optional"></div>'+
     '</div>'+
-    '<button class="btn secondary" id="saveProfileBtn">Save</button>'+
   '</div>';
+
+  html += '<div class="card"><h3>Life Stage</h3>'+
+    '<div class="field"><label>Which best describes you?</label><select id="pLifeStage">'+
+      opt('adult','Adult', p.lifeStage)+opt('teen','Teenager (under 18)', p.lifeStage)+opt('older','Older Adult (65+)', p.lifeStage)+opt('pregnant','Pregnant', p.lifeStage)+
+    '</select></div>'+
+    '<p class="small-muted">This adjusts exercise intensity and impact for safety. Not a substitute for medical advice.</p>'+
+  '</div>';
+
+  html += '<div class="card"><h3>Training Setup</h3>'+
+    '<div class="field"><label>Fitness level</label><select id="pLevel">'+
+      opt('beginner','Beginner', p.fitnessLevel)+opt('intermediate','Intermediate', p.fitnessLevel)+opt('advanced','Advanced', p.fitnessLevel)+
+    '</select></div>'+
+    (p.lifeStage==='pregnant'
+      ? '<p class="small-muted">Goal is set to gentle, doctor-cleared activity while pregnant.</p>'
+      : '<div class="field"><label>Primary goal</label><select id="pGoal">'+
+          opt('general','General Fitness & Stay Active', p.goal)+opt('weightloss','Lose Weight', p.goal)+opt('muscle','Build Muscle', p.goal)+opt('flexibility','Flexibility & Mobility', p.goal)+
+        '</select></div>') +
+    '<div class="field"><label>Default equipment</label><select id="pEquip">'+
+      opt('gym','Full Gym', p.equipment)+opt('home','Home (dumbbells/bands)', p.equipment)+opt('body','Bodyweight Only', p.equipment)+
+    '</select></div>'+
+    '<p class="small-muted">You can switch equipment for a single day from the Workout tab any time.</p>'+
+  '</div>';
+
+  html += '<div class="card"><h3>Schedule</h3>'+
+    '<div class="field"><label>Preferred training time</label><select id="pTime">'+
+      opt('morning','Early Morning', p.trainingTime)+opt('midday','Midday', p.trainingTime)+opt('evening','Evening', p.trainingTime)+opt('flexible','Flexible / Varies', p.trainingTime)+
+    '</select></div>'+
+    '<div class="field"><label>Day-to-day activity</label><select id="pActivity">'+
+      opt('desk','Mostly desk-based', p.activityLevel)+opt('onfeet','On my feet a lot', p.activityLevel)+opt('demanding','Physically demanding job', p.activityLevel)+
+    '</select></div>'+
+  '</div>';
+
+  html += '<button class="btn" id="saveProfileBtn" style="margin-bottom:14px;">Save Profile</button>';
 
   html += '<div class="card"><h3>Stats</h3>'+
     '<div class="row"><span class="small-muted">Current weight</span><b>'+latest.toFixed(1)+' kg</b></div>'+
@@ -871,9 +1286,8 @@ function renderProfile(){
   '</div>';
 
   html += '<div class="card"><h3>Guidance</h3><p class="small-muted" style="line-height:1.6;">'+
-    'Weight loss is driven mainly by nutrition — the workouts here build muscle and torch calories, but a modest calorie deficit is what moves the scale. '+
-    'Aim for ~0.5-1% of bodyweight lost per week for a sustainable pace. '+
-    'This app is not medical advice — check with a doctor before starting a new program, especially if you have existing injuries or conditions.'+
+    'Weight loss is driven mainly by nutrition — the workouts here build muscle and burn calories, but a modest calorie deficit is what moves the scale. '+
+    'This app is not medical advice — check with a doctor before starting a new program, especially if you are pregnant, new to exercise, over 65, under 18, or have an existing injury or health condition.'+
   '</p></div>';
 
   html += '<div class="card"><h3>Data</h3>'+
@@ -890,12 +1304,19 @@ function renderProfile(){
     p.startWeight = parseFloat(document.getElementById('pStartW').value) || p.startWeight;
     var goal = parseFloat(document.getElementById('pGoalW').value);
     p.goalWeight = isNaN(goal) ? null : goal;
+    p.lifeStage = document.getElementById('pLifeStage').value;
+    p.fitnessLevel = document.getElementById('pLevel').value;
+    var goalSel = document.getElementById('pGoal');
+    if(goalSel) p.goal = goalSel.value;
+    p.equipment = document.getElementById('pEquip').value;
+    p.trainingTime = document.getElementById('pTime').value;
+    p.activityLevel = document.getElementById('pActivity').value;
     persist();
     renderAll();
   });
 
   document.getElementById('exportBtn').addEventListener('click', function(){
-    var data = JSON.stringify({profile:state.profile, phase:state.phase, workouts:state.workouts, weights:state.weights}, null, 2);
+    var data = JSON.stringify({profile:state.profile, phase:state.phase, workouts:state.workouts, weights:state.weights, strengthLogs:state.strengthLogs}, null, 2);
     var blob = new Blob([data], {type:'application/json'});
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
@@ -905,15 +1326,17 @@ function renderProfile(){
   });
 
   document.getElementById('resetBtn').addEventListener('click', function(){
-    if(confirm('This will erase your workout log, weight history, and profile from this device. Continue?')){
+    if(confirm('This will erase your workout log, weight history, strength logs, and profile from this device. Continue?')){
       localStorage.removeItem(KEYS.profile);
       localStorage.removeItem(KEYS.phase);
       localStorage.removeItem(KEYS.workouts);
       localStorage.removeItem(KEYS.weights);
+      localStorage.removeItem(KEYS.strengthLogs);
       state.profile = JSON.parse(JSON.stringify(defaultProfile));
       state.phase = 3;
       state.workouts = {};
       state.weights = [{date: todayStr(), kg: 100}];
+      state.strengthLogs = {};
       persist();
       renderAll();
     }
